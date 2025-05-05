@@ -1,0 +1,111 @@
+trigger:
+- main
+
+variables:
+  azureSubscription: 'f44a9baa-fba2-40ed-b28d-088b1c37b5ff'
+  webAppName: ''
+  environmentName: ''
+  vmImageName: 'ubuntu-latest'
+
+stages:
+
+- stage: Build
+  displayName: Build stage
+  jobs:
+  - job: MavenPackage
+    displayName: Maven Build
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: Maven@4
+      displayName: 'Compile only (no tests)'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'clean compile'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.17'
+        jdkArchitectureOption: 'x64'
+
+- stage: Test
+  displayName: Test stage
+  dependsOn: Build
+  jobs:
+  - job: RunTests
+    displayName: Run Unit Tests
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: Maven@4
+      displayName: 'Run tests'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'test'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.17'
+        jdkArchitectureOption: 'x64'
+        publishJUnitResults: true
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+
+    - task: PublishTestResults@2
+      condition: succeededOrFailed()
+      inputs:
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+        testRunTitle: 'JUnit Test Results'
+
+    # Opcional: cobertura de código con JaCoCo
+    - task: PublishCodeCoverageResults@1
+      condition: succeededOrFailed()
+      inputs:
+        codeCoverageTool: 'JaCoCo'
+        summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/target/site/jacoco/jacoco.xml'
+        reportDirectory: '$(System.DefaultWorkingDirectory)/**/target/site/jacoco'
+
+- stage: Package
+  displayName: Package stage
+  dependsOn: Test
+  jobs:
+  - job: PackageApp
+    displayName: Package and publish artifacts
+    pool:
+      vmImage: $(vmImageName)
+    steps:
+    - task: Maven@4
+      displayName: 'Maven Package'
+      inputs:
+        mavenPomFile: 'pom.xml'
+        goals: 'package -DskipTests=true'
+        javaHomeOption: 'JDKVersion'
+        jdkVersionOption: '1.17'
+        jdkArchitectureOption: 'x64'
+
+    - task: CopyFiles@2
+      displayName: 'Copy Files to artifact staging directory'
+      inputs:
+        SourceFolder: '$(System.DefaultWorkingDirectory)'
+        Contents: '**/target/*.?(war|jar)'
+        TargetFolder: $(Build.ArtifactStagingDirectory)
+
+    - upload: $(Build.ArtifactStagingDirectory)
+      artifact: drop
+
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: Package
+  condition: succeeded()
+  jobs:
+  - deployment: DeployLinuxWebApp
+    displayName: Deploy Linux Web App
+    environment: $(environmentName)
+    pool:
+      vmImage: $(vmImageName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: AzureWebApp@1
+            displayName: 'Azure Web App Deploy'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appType: webAppLinux
+              appName: $(webAppName)
+              package: '$(Pipeline.Workspace)/drop/**/target/*.?(war|jar)'
